@@ -1,34 +1,34 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.3;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/IERC721Enumerable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 
-/// @title Adventure Time for Loot holders!
-/// @author Will Papper <https://twitter.com/WillPapper>
+/// @title Adventure Time for Genesis Adventurer holders!
 /// @notice This contract mints Adventure Time for Loot holders and provides
 /// administrative functions to the Loot DAO. It allows:
-/// * Loot holders to claim Adventure Time
+/// * Genesis Adventurer holders to claim Adventure Time
 /// * A DAO to set seasons for new opportunities to claim Adventure Time
 /// * A DAO to mint Adventure Time for use within the Loot ecosystem
 /// @custom:unaudited This contract has not been audited. Use at your own risk.
-contract AdventureTime is Context, Ownable, ERC20 {
-    // Loot contract is available at https://etherscan.io/address/0x8dB687aCEb92c66f013e1D614137238Cc698fEdb
-    address public gaContractAddress;
-    IERC721 private _gaContract;
+contract AdventureTime is Context, Ownable, ERC20, ERC20Burnable {
+    // Genesis Adventurer contract is available at https://etherscan.io/token/0x8db687aceb92c66f013e1d614137238cc698fedb
+    address public SeasonContractAddress;
+    IERC721Enumerable private SeasonContract;
 
-    // Give out 100,000 Adventure Time for every Loot Bag that a user holds
-    uint256 public adventureTimePerTokenId = 100000 * (10**decimals());
+    // Give out 100,000 Adventure Time for every Genesis Adventurer that a user holds
+    uint256 public adventureTimePerTokenId = 100 * (10**decimals());
 
     uint256 public tokenIdStart = 1;
 
-    uint256 public tokenIdEnd = 2540;
+    uint256 public tokenIdEnd = 8000;
 
-    // Seasons are used to allow users to claim tokens regularly. Seasons are
-    // decided by the DAO.
+    // Seasons are used to allow users to claim tokens regularly.
+    // Seasons are decided by the DAO.
     uint256 public season = 0;
 
     // Track claimed tokens within a season
@@ -36,53 +36,101 @@ contract AdventureTime is Context, Ownable, ERC20 {
     // claimedForSeason[season][tokenId][claimed]
     mapping(uint256 => mapping(uint256 => bool)) public seasonClaimedByTokenId;
 
-    constructor(address _gaContractAddress, address _genesisDaoAddress) Ownable() ERC20("Adventure Time", "ATIME") {
+    constructor(
+        address _CurrentSeasonContractAddress,
+        address _genesisDaoAddress
+    ) Ownable() ERC20("Adventure Time", "ATIME") {
         // Transfer ownership to the Genesis Project DAO
         // Ownable by OpenZeppelin automatically sets owner to msg.sender, but
         // we're going to be using a separate wallet for deployment
         transferOwnership(_genesisDaoAddress);
-        gaContractAddress = _gaContractAddress;
-        _gaContract = IERC721(gaContractAddress);
+        SeasonContractAddress = _CurrentSeasonContractAddress;
+        SeasonContract = IERC721Enumerable(SeasonContractAddress);
     }
 
-    /// @notice Claim Adventure Time for a given Loot ID
-    /// @param tokenId The tokenId of the Loot NFT
-    function claimById(uint256 tokenId) external {
-        // Follow the Checks-Effects-Interactions pattern to prevent reentrancy
-        // attacks
+    function claimById(uint256 _tokenId) external {
+        // Follow the Checks-Effects-Interactions pattern
+        // to prevent reentrancy attacks
+        _markClaimedForSeason(_tokenId);
+        _mint(_msgSender(), adventureTimePerTokenId);
+    }
+
+    function claimAllForOwner() external {
+        uint256 tokenBalanceOwner = SeasonContract.balanceOf(_msgSender());
+        uint256[] memory tokensUnclaimed = new uint256[](tokenBalanceOwner);
 
         // Checks
+        require(tokenBalanceOwner > 0, "NO_TOKENS_OWNED");
 
-        // Check that the msgSender owns the token that is being claimed
+        for (uint256 i = 0; i < tokenBalanceOwner; i++) {
+            if (
+                seasonClaimedByTokenId[season][
+                    SeasonContract.tokenOfOwnerByIndex(_msgSender(), i)
+                ] == false
+            ) {
+                tokensUnclaimed[i] = SeasonContract.tokenOfOwnerByIndex(
+                    _msgSender(),
+                    i
+                );
+            } else {
+                delete tokensUnclaimed[i];
+            }
+        }
+
+        // i < tokenBalanceOwner because tokenBalanceOwner is 1-indexed
+        for (uint256 i = 0; i < tokensUnclaimed.length; i++) {
+            if (tokensUnclaimed[i] != 0) {
+                _markClaimedForSeason(tokensUnclaimed[i]);
+            } else {
+                tokenBalanceOwner--;
+            }
+        }
+        require(tokenBalanceOwner > 0, "ALL_TOKENS_CLAIMED");
+
+        _mint(_msgSender(), adventureTimePerTokenId * tokenBalanceOwner);
+    }
+
+    function multiClaimByID(uint256[] memory _tokenId) external {
+        for (uint256 i = 0; i < _tokenId.length; i++) {
+            _markClaimedForSeason(_tokenId[i]);
+        }
+        _mint(_msgSender(), adventureTimePerTokenId * _tokenId.length);
+    }
+
+    /// @notice Checks for requirements then marks token complete for season
+    /// @param _tokenId The tokenId of the NFT
+    function _markClaimedForSeason(uint256 _tokenId)
+        internal
+        checkOwnerOfToken(_tokenId)
+        checkTokenInRange(_tokenId)
+        checkAlreadySeasonClaimed(_tokenId)
+    {
+        // Mark that Adventure Time has been claimed for this season for the token
+        seasonClaimedByTokenId[season][_tokenId] = true;
+    }
+
+    modifier checkOwnerOfToken(uint256 _tokenId) {
         require(
-            _msgSender() == _gaContract.ownerOf(tokenId),
+            _msgSender() == SeasonContract.ownerOf(_tokenId),
             "MUST_OWN_TOKEN_ID"
         );
+        _;
+    }
 
-        // Check that the token ID is in range
-        // We use >= and <= to here because all of the token IDs are 0-indexed
+    modifier checkTokenInRange(uint256 _tokenId) {
         require(
-            tokenId >= tokenIdStart && tokenId <= tokenIdEnd,
+            _tokenId >= tokenIdStart && _tokenId <= tokenIdEnd,
             "TOKEN_ID_OUT_OF_RANGE"
         );
+        _;
+    }
 
-        // Check that Adventure Time have not already been claimed this season
-        // for a given tokenId
+    modifier checkAlreadySeasonClaimed(uint256 _tokenId) {
         require(
-            !seasonClaimedByTokenId[season][tokenId],
+            !seasonClaimedByTokenId[season][_tokenId],
             "TIME_CLAIMED_FOR_TOKEN_ID"
         );
-
-        // Effects
-
-        // Mark that Adventure Time has been claimed for this season for the
-        // given tokenId
-        seasonClaimedByTokenId[season][tokenId] = true;
-
-        // Interactions
-
-        // Send Adventure Time to the owner of the token ID
-        _mint(_msgSender(), adventureTimePerTokenId);
+        _;
     }
 
     /// @notice Allows the DAO to mint new tokens for use within the Loot
@@ -96,53 +144,53 @@ contract AdventureTime is Context, Ownable, ERC20 {
 
     /// @notice Allows the DAO to set a new contract address for Loot. This is
     /// relevant in the event that Loot migrates to a new contract.
-    /// @param gaContractAddress_ The new contract address for Loot
-    function daoSetGAContractAddress(address gaContractAddress_)
+    /// @param _SeasonContractAddress The new contract address for Loot
+    function daoSetSeasonContractAddress(address _SeasonContractAddress)
         external
         onlyOwner
     {
-        gaContractAddress = gaContractAddress_;
-        _gaContract = IERC721(gaContractAddress);
+        SeasonContractAddress = _SeasonContractAddress;
+        SeasonContract = IERC721Enumerable(SeasonContractAddress);
     }
 
     /// @notice Allows the DAO to set the token IDs that are eligible to claim
     /// Loot
-    /// @param tokenIdStart_ The start of the eligible token range
-    /// @param tokenIdEnd_ The end of the eligible token range
-    /// @dev This is relevant in case a future GA contract has a different
-    /// total supply of GA's
-    function daoSetTokenIdRange(uint256 tokenIdStart_, uint256 tokenIdEnd_)
+    /// @param _tokenIdStart The start of the eligible token range
+    /// @param _tokenIdEnd The end of the eligible token range
+    /// @dev This is relevant in case a future NFT contract has a different
+    /// total supply of tokens
+    function daoSetTokenIdRange(uint256 _tokenIdStart, uint256 _tokenIdEnd)
         external
         onlyOwner
     {
-        tokenIdStart = tokenIdStart_;
-        tokenIdEnd = tokenIdEnd_;
+        tokenIdStart = _tokenIdStart;
+        tokenIdEnd = _tokenIdEnd;
     }
 
     /// @notice Allows the DAO to set a season for new Adventure Time claims
-    /// @param season_ The season to use for claiming Loot
-    function daoSetSeason(uint256 season_) public onlyOwner {
-        season = season_;
+    /// @param _season The season to use for claiming Loot
+    function daoSetSeason(uint256 _season) public onlyOwner {
+        season = _season;
     }
 
     /// @notice Allows the DAO to set the amount of Adventure Time that is
     /// claimed per token ID
-    /// @param adventureTimeDisplayValue The amount of Loot a user can claim.
+    /// @param _adventureTimeDisplayValue The amount of Loot a user can claim.
     /// This should be input as the display value, not in raw decimals. If you
     /// want to mint 100 Loot, you should enter "100" rather than the value of
     /// 100 * 10^18.
-    function daoSetAdventureTimePerTokenId(uint256 adventureTimeDisplayValue)
+    function daoSetAdventureTimePerTokenId(uint256 _adventureTimeDisplayValue)
         public
         onlyOwner
     {
-        adventureTimePerTokenId = adventureTimeDisplayValue * (10**decimals());
+        adventureTimePerTokenId = _adventureTimeDisplayValue * (10**decimals());
     }
 
     /// @notice Allows the DAO to set the season and Adventure Time per token ID
     /// in one transaction. This ensures that there is not a gap where a user
     /// can claim more Adventure Time than others
-    /// @param season_ The season to use for claiming loot
-    /// @param adventureTimeDisplayValue The amount of Loot a user can claim.
+    /// @param _season The season to use for claiming loot
+    /// @param _adventureTimeDisplayValue The amount of Loot a user can claim.
     /// This should be input as the display value, not in raw decimals. If you
     /// want to mint 100 Loot, you should enter "100" rather than the value of
     /// 100 * 10^18.
@@ -152,10 +200,10 @@ contract AdventureTime is Context, Ownable, ERC20 {
     /// it's not worth moving these values into their own internal function to
     /// skip the gas used on the modifier check.
     function daoSetSeasonAndAdventureTimePerTokenId(
-        uint256 season_,
-        uint256 adventureTimeDisplayValue
+        uint256 _season,
+        uint256 _adventureTimeDisplayValue
     ) external onlyOwner {
-        daoSetSeason(season_);
-        daoSetAdventureTimePerTokenId(adventureTimeDisplayValue);
+        daoSetSeason(_season);
+        daoSetAdventureTimePerTokenId(_adventureTimeDisplayValue);
     }
 }
